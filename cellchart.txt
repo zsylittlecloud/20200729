@@ -1,0 +1,191 @@
+setwd('D:/GBM单细胞/6cellchart')
+
+library(Seurat)
+library(CellChat)
+library(patchwork)
+
+#抬高内存限制
+memory.limit(120000)
+load('sce2.RData')
+
+#如果太大取一半细胞
+sce = sce[,sample(1:ncol(sce),round(ncol(sce)/5)) ]
+save(sce,file = 'sce55.RData')
+load('sce55.RData')
+
+#提取count文件并使用normalizeData:对每个细胞的每个基因的表达量除以总的表达量，然后乘以标度因子10000，然后进行log化（数据的归一化） 
+data.input=normalizeData(as.matrix(GetAssayData(sce,slot = "counts")),
+                         scale.factor = 10000, do.log = TRUE)
+cell_type=sce@meta.data
+#删除sce
+rm(sce)
+
+#读取亚群注释文件，并添加至细胞注释文件中
+cell_anno<-read.delim('celltype.txt',sep='\t',header = T,)
+colnames(cell_anno)=c('seurat_clusters','cell_type')
+cell_type=merge(data.frame(cell=rownames(cell_type),cell_type),
+                cell_anno,by='seurat_clusters')
+head(cell_type)
+rownames(cell_type)=cell_type$cell
+
+#创建cellchat对象
+cellchat <- createCellChat(object = data.input, meta = cell_type, group.by = "cell_type")
+#添加meta，细胞的注释信息
+cellchat <- addMeta(cellchat, meta = cell_type)
+#设置细胞的默认的分组
+cellchat <- setIdent(cellchat, ident.use = "cell_type") 
+levels(cellchat@idents) 
+#计算每一个分组的细胞个数
+groupSize <- as.numeric(table(cellchat@idents)) 
+#导入人的配受体数据库
+CellChatDB=CellChatDB.human
+##小鼠的
+#CellChatDB <- CellChatDB.mouse
+
+#对表达数据进行预处理，用于细胞间的通信分析。
+#首先在一个细胞组中识别过表达的配体或受体，然后将基因表达数据投射到蛋白-蛋白相互作用(PPI)网络上。
+#如果配体或受体过表达，则识别过表达配体和受体之间的相互作用。
+#使用配受体数据库中全部的信息进行后续分析
+CellChatDB.use <- CellChatDB
+cellchat@DB <- CellChatDB.use
+#在矩阵的所有的基因中提取signaling gene ,结果保存在data.signaling
+cellchat <- subsetData(cellchat) 
+#future::plan("multiprocess", workers = 5)
+#寻找每一个亚群中高表达的配受体
+cellchat <- identifyOverExpressedGenes(cellchat)
+#将上一步运行的结果储存在cellchat@LR$LRsig
+cellchat <- identifyOverExpressedInteractions(cellchat)
+#projectData将配受体对的表达值投射到PPI上,来对cellchat@data.signaling 中的表达值进行校正并保存在cellchat@data.project
+cellchat <- projectData(cellchat, PPI.human)
+
+#根据表达值推测细胞互做的概率 通过计算与每个信号通路相关的所有配体-受体相互作用的通信概率来推断信号通路水平上的通信概率。
+
+cellchat <- computeCommunProb(cellchat,raw.use = TRUE,type = "truncatedMean",trim=0)
+
+ 
+
+#过滤，某些细胞群中只有少数细胞，则过滤掉细胞间的通信
+#cellchat <- filterCommunication(cellchat,min.cells=1)
+#df.net <- subsetCommunication(cellchat)
+#推断信号通路水平的细胞通讯网络 ·通过计算链路的数量或汇总通信概率来计算细胞间的聚合通信网络
+cellchat <- computeCommunProbPathway(cellchat)
+df.netp <- subsetCommunication(cellchat,slot.name='netP')
+
+
+
+############################可视化#################################
+#统计细胞和细胞之间通信的数量（有多少个配体-受体对）和强度（概率）
+cellchat <- aggregateNet(cellchat)
+#计算每种细胞各有多少个
+groupSize <- as.numeric(table(cellchat@idents))
+pdf('net_number_strength.pdf',he=9,wi=15,onefile = F)
+par(mfrow = c(1,2)) 
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, 
+                 weight.scale = T, label.edge= F, title.name = "Number of interactions") 
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T,
+                 label.edge= F, title.name = "Interaction weights/strength")
+
+dev.off()
+
+###################某一细胞亚群与其他细胞亚群之间的作用（配受体的作用的数量）可视化####################
+mat <- cellchat@net$count
+cell_num=length(as.character(unique(cell_type$cell_type)))
+cell_col=ceiling(sqrt(cell_num))
+cell_row=ceiling(cell_num/cell_col)
+pdf('net_number_individual.pdf',he=15,wi=15)
+par(mfrow = c(cell_row,cell_col), xpd=TRUE) 
+for (i in 1:nrow(mat)) { 
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))   
+  mat2[i, ] <- mat[i, ]   
+  netVisual_circle(mat2, vertex.weight = groupSize, 
+                   weight.scale = T, arrow.width = 0.2,                     
+                   arrow.size = 0.1, edge.weight.max = max(mat), 
+                   title.name = rownames(mat)[i])
+}
+dev.off()
+write.table(df.net,file = 'cellchat_result.txt',quote = F,row.names = F,sep='\t')
+
+#单个信号通路或配体-受体介导的细胞互作可视化###
+#1、层次图
+#查看都有哪些信号通路
+cellchat@netP$pathways  
+# 选择其中一个信号通路，比如说 MHC-II
+pathways.show <- c("SEMA3")
+#有哪些细胞亚群
+levels(cellchat@idents)
+#选择哪些细胞亚群进行绘图
+vertex.receiver = c(1,3) 
+p1=netVisual_aggregate(cellchat, signaling = pathways.show, 
+                    vertex.receiver = vertex.receiver,
+                    layout = 'hierarchy')
+p1
+pdf('SEMA3_hierarchy.pdf',he=7,wi=15)
+print(p1)
+dev.off()
+
+#2、网络图
+p2=netVisual_aggregate(cellchat, signaling = pathways.show,
+                    vertex.receiver=vertex.receiver,
+                    layout = "circle")
+
+p2
+pdf('SEMA3.pdf',he=7,wi=12)
+print(p2)
+dev.off()
+
+#3、和弦图（Chord diagram）
+pdf('MHC-II_chord.pdf',he=15,wi=15)
+netVisual_aggregate(cellchat, signaling = pathways.show,
+                       layout = "chord")
+dev.off()
+
+#4、热图
+pdf('MHC-II_heatmap.pdf',he=7,wi=7)
+par(mfrow=c(1,1)) 
+netVisual_heatmap(cellchat,
+                  signaling = pathways.show, 
+                  color.heatmap = "Reds")
+dev.off()
+
+#计算配体受体对选定信号通路的贡献值（在这里就是查看哪条配体-受体对MHC-II贡献最大）
+p3<-netAnalysis_contribution(cellchat,
+                         signaling = pathways.show) 
+p3
+pairLR.path <- extractEnrichedLR(cellchat,
+                                 signaling = pathways.show
+                                 , geneLR.return = FALSE) 
+pairLR.path
+pdf('MHC-II_LR_ontribution.pdf')
+print(p3)
+dev.off()
+
+#提取对这个通路贡献最大的配体受体对来展示（也可以选择其他的配体受体对），针对特定的LR可视化
+LR.show <- pairLR.path[1,]
+pdf('MHC-II_LR_hierarchy.pdf',he=7,wi=7)
+netVisual_individual(cellchat, 
+                     signaling = pathways.show,
+                     pairLR.use = LR.show, layout = "circle")
+dev.off()
+
+#多个配受体介导的细胞互作关系可视化#####
+#有哪些细胞亚群
+levels(cellchat@idents)
+#配受体介导的亚群-亚群作用的气泡图
+pdf('1.pdf',he=7,wi=7)
+netVisual_bubble(cellchat, 
+                 sources.use = c(1,7,8),  
+                 targets.use = c(3,4,5), 
+                 remove.isolate = FALSE)
+dev.off()
+
+#查看都有哪些信号通路
+cellchat@netP$pathways
+#####指定信号通路的
+pdf('2.pdf',he=7,wi=7)
+netVisual_bubble(cellchat, 
+                 sources.use = c(3,5,7,8,9), 
+                 targets.use = c(1,2,4,6),                  
+                 signaling = c("SEMA3","MSTN"), 
+                 remove.isolate = FALSE)
+dev.off()
+

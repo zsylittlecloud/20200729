@@ -1,0 +1,182 @@
+setwd('C:/Users/zsy/Desktop/GBM单细胞/1quality')
+options(stringsAsFactors = F)
+#加载R包
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(gtools)
+library(stringr)
+library(Matrix)
+library(tidyverse)
+library(patchwork)
+library(data.table)
+library(RColorBrewer)
+library(ggpubr)
+
+#读取数据
+#1#############批量读取单细胞的数据####################
+dir_name=c('N1','N2','T1','T2','N3','N4','T3','T4')
+datalist=list()
+for (i in 1:length(dir_name)){
+  dir.10x = paste0("GSE162631_RAW/",dir_name[i])
+  my.data <- Read10X(data.dir = dir.10x) 
+  datalist[[i]]=CreateSeuratObject(counts = my.data, project = dir_name[i], 
+                                   #每个基因至少在3个细胞中表达，每一个细胞至少有250个基因表达
+                                   min.cells = 3, min.features = 250)
+}
+#修改样本名称
+names(datalist)=dir_name
+
+#2##################细胞质控####################
+# 批量计算线粒体和rRNA占比 对于人：线粒体基因均以MT-开头 对于小鼠：线粒体基因均以mt-开头
+for (i in 1:length(datalist)){
+  sce <- datalist[[i]]
+  sce[["percent.mt"]] <- PercentageFeatureSet(sce, pattern = "^MT-")# 计算线粒体占比
+  sce[["percent.Ribo"]] <- PercentageFeatureSet(sce, pattern = "^RP[SL]")# 计算rRNA占比
+  datalist[[i]] <- sce
+  rm(sce)
+}
+#批量绘制过滤前的小提琴图
+#nFeature_RNA（每个细胞检测表达的基因数目）、
+#nCount_RNA（表示每个细胞测序的UMI count值）、
+#percent.mt（每个细胞的线粒体基因表达量占总体基因的比例）、
+#percent.Ribo（每个细胞的rRNA表达量占总体基因的比例）
+violin=list()
+for (i in 1:length(datalist)){
+  violin[[i]] <- VlnPlot(datalist[[i]],
+                         features = c("nFeature_RNA", "nCount_RNA", "percent.mt","percent.Ribo"),
+                         pt.size = 0.1, 
+                         ncol = 4)
+}
+pearplot_befor <- CombinePlots(plots = violin , nrow=length(datalist), legend="none")
+pearplot_befor
+#输出质控前的图
+ggsave(filename = 'QC_before.pdf',plot = pearplot_befor,he=15,wi=15)
+
+
+#所有样本合并的小提琴图
+sce <- merge(datalist[[1]],y=datalist[2:length(datalist)])
+#统计每一个样本的个数
+raw_count <- table(sce@meta.data$orig.ident)
+table(sce@meta.data$orig.ident)
+
+pearplot_befor1<-VlnPlot(sce,
+                        features = c("nFeature_RNA", "nCount_RNA", "percent.mt","percent.Ribo"),
+                        pt.size = 0.1, 
+                        ncol = 4)
+pearplot_befor1
+#输出样本合并在一起的图
+ggsave(filename = 'QC_before1.pdf',plot = pearplot_befor1,he=7,wi=15)
+rm(sce)
+################质控过滤#####################
+#nFeature_RNA（每个细胞检测表达的基因数目大于500小于6000） 
+#nCount_RNA（表示每个细胞测序的UMI count值大于1000，且剔除最大的前3%的细胞） 
+#percent.mt（每个细胞的线粒体基因表达量占总体基因的比例小于35%，且去除含量最高的2%的细胞） 
+#percent.Ribo（去除每个细胞的rRNA表达量占总体基因的比例最小的1%和最大的1%）
+datalist <- lapply(X = datalist, FUN = function(x) {
+  x<-subset(x,subset = nFeature_RNA > 500 & 
+              nFeature_RNA < 6000 & 
+              quantile(percent.mt, 0.98) > percent.mt & percent.mt < 35 &
+              quantile(percent.Ribo, 0.99) > percent.Ribo & percent.Ribo > quantile(percent.Ribo, 0.01) & 
+              nCount_RNA < quantile(nCount_RNA, 0.97) & nCount_RNA > 1000 )
+})
+#合并数据
+sce <- merge(datalist[[1]],y=datalist[2:length(datalist)])
+clean_count <- table(sce@meta.data$orig.ident)
+table(sce@meta.data$orig.ident)
+#过滤前后样本细胞数据的统计
+summary_cells <- as.data.frame(cbind(raw_count,clean_count))
+counts <- rbind(as.data.frame(cbind(summary_cells[,1],rep("raw",each = length(summary_cells[,1])))),
+                as.data.frame(cbind(summary_cells[,2],rep("clean",each = length(summary_cells[,2])))))
+counts$sample <- rep(rownames(summary_cells),times =2)
+colnames(counts)<- c("count","Stat","sample")
+counts[,1] <- as.numeric(counts[,1])
+counts$Stat <- factor(counts$Stat, levels=c("raw", "clean"), ordered=TRUE)
+fit_cell_count <- ggplot(data =counts, mapping = aes(x = sample, y=count))+ 
+  geom_bar(aes(fill = Stat),stat = 'identity', position = 'dodge') + scale_fill_brewer(palette = "Set1") +
+  theme(text=element_text(size=10),
+        legend.title=element_blank(),
+        panel.background = element_rect(fill = "white", colour = "black",size = 0.2),
+        legend.key = element_rect(fill = "white", colour = "white"),
+        legend.background = (element_rect(colour= "white",fill = "white")))
+
+fit_cell_count
+#从柱状图中可以看出过滤前后，每一个样本损失了多少细胞
+ggsave(filename = 'fit_cell_count.pdf',plot = fit_cell_count,width = 9,height = 9)
+violin_after=list()
+for (i in 1:length(datalist)){
+  violin_after[[i]] <- VlnPlot(datalist[[i]],
+                               features = c("nFeature_RNA", "nCount_RNA", "percent.mt","percent.Ribo"), 
+                               pt.size = 0.1,
+                               ncol = 4)
+}
+pearplot_after <- CombinePlots(plots = violin_after , nrow=length(datalist), legend="none")
+pearplot_after
+#质控后未合并的小提琴图
+ggsave(filename = 'QC_after.pdf',plot = pearplot_after,he=15,wi=15)
+pearplot_after1 <- VlnPlot(sce,
+                         features = c("nFeature_RNA", "nCount_RNA", "percent.mt","percent.Ribo"), 
+                         pt.size = 0.1,
+                         ncol = 4)
+pearplot_after1
+#质控后合并的小提琴图
+ggsave(filename = 'QC_after1.pdf',plot = pearplot_after1,he=7,wi=15)
+#质控前和后图片的合并的小提琴图
+pearplot_befor1
+pearplot_after1
+qc_merge<- CombinePlots(plots = list(pearplot_befor1,pearplot_after1) , 
+                        nrow=2, legend='none')
+qc_merge
+ggsave(filename = 'qc_merge.pdf',plot = qc_merge,he=9,wi=15)
+
+#保存datalist文件
+save(datalist,file = 'datalist.RData')
+load('datalist.RData')
+
+#3###################数据归一化和筛选高变基因#############################
+#合并数据
+sce <- merge(datalist[[1]],y=datalist[2:length(datalist)])
+rm(datalist)
+sce <- NormalizeData(sce, normalization.method = "LogNormalize", scale.factor = 10000)
+sce <- FindVariableFeatures(sce, 
+                            selection.method = "vst", 
+                            nfeatures = 2000,
+                            mean.cutoff=c(0.0125,3),
+                            dispersion.cutoff =c(1.5,Inf))
+#NormalizeData:对每个细胞的每个基因的表达量除以总的表达量，然后乘以标度因子10000，然后进行log化（数据的归一化）。
+#高变基因: 某些基因在细胞间的表达水平变化比较大，这样的一些基因更能反应生物学的信号，常常被用来做下游分析。
+#FindVariableFeatures：基于normalization后的表达数据筛选高变基因，筛选前2000个特征基因。
+top20 <- head(VariableFeatures(sce), 20)
+plot1 <- VariableFeaturePlot(sce)
+plot2 <- LabelPoints(plot = plot1, points = top20, repel = TRUE, size=3.0)
+feat_20 <- CombinePlots(plots = list(plot1, plot2),legend="bottom")
+feat_20
+### 可视化前20个高变基因
+ggsave(filename = 'feat_20.pdf',plot = feat_20,he=10,wi=15)
+rm(feat_20)
+
+#ScaleData表达量的标度化，将归一化后的表达量进行标准化和中心化，该转换可以消除高表达基因的影响
+scale.genes <-  rownames(sce)
+gc()
+sce <- ScaleData(sce, features = scale.genes)
+#样本的分组
+meta1<-data.frame(matrix(nrow=length(sce@meta.data$orig.ident), ncol=2)) 
+colnames(meta1)=c('Sample','Group1')
+meta1$Sample=sce@meta.data$orig.ident
+unique(meta1$Sample)
+### Group1    Tumor 为原发性肿瘤；Normal：正常
+meta1[grep("N1",meta1$Sample),]$Group1="Normal"
+meta1[grep("N2",meta1$Sample),]$Group1="Normal"
+meta1[grep("N3",meta1$Sample),]$Group1="Normal"
+meta1[grep("N4",meta1$Sample),]$Group1="Normal"
+meta1[grep("T1",meta1$Sample),]$Group1="Tumor"
+meta1[grep("T2",meta1$Sample),]$Group1="Tumor"
+meta1[grep("T3",meta1$Sample),]$Group1="Tumor"
+meta1[grep("T4",meta1$Sample),]$Group1="Tumor"
+
+sce <- AddMetaData(sce, meta1$Sample,col.name = "Sample")
+sce <- AddMetaData(sce, meta1$Group1,col.name = "Group1")
+save(sce,file = 'sce.RData')
+
+

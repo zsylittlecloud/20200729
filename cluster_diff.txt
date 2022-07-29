@@ -1,0 +1,163 @@
+#费舍尔精确检验：是用于分析列联表（contingency tables）统计显著性检验方法， 它用于检验两个分类的关联
+####################亚群的差异分析###########################
+setwd('D:/GBM单细胞/4cluster_diff')
+memory.limit(60000)
+load('sce3.RData')
+cell_num<-as.data.frame(table(sce@active.ident,sce$Group1))
+colnames(cell_num)=c('clusters','type','cell_num')
+cell_num=tidyr::spread(cell_num,type,cell_num)
+cell_num
+####################T/N 计算差异 在筛选的过程中选择p<0.05且fc>4或者是fc<0.25的筛选差异的亚群################
+cell_num1=data.frame()
+for (i in 1:nrow(cell_num)){
+  print(i)
+  pval=fisher.test(matrix(c(cell_num[i,3],cell_num[i,2],
+                            sum(cell_num[,3])-cell_num[i,3],
+                            sum(cell_num[,2])-cell_num[i,2]),
+                          nrow = 2,ncol = 2)
+                   ,alternative = "two.sided")$p.value
+  cell_num1[i,'T_celltype']=cell_num[i,3]
+  cell_num1[i,'T_no_celltype']=sum(cell_num[,3])-cell_num[i,3]
+  cell_num1[i,'N_celltype']=cell_num[i,2]
+  cell_num1[i,'N_no_celltype']=sum(cell_num[,2])-cell_num[i,2]
+  cell_num1[i,'p.val']=pval
+  cell_num1[i,'fc']=(cell_num[i,3]/(sum(cell_num[,3])-cell_num[i,3]))/(cell_num[i,2]/(sum(cell_num[,2])-cell_num[i,2]))
+}
+cell_num1$cell_name=cell_num$clusters
+cell_num1
+#差异分析结果的保存
+write.table(cell_num1,'cell_type_statistical.txt',quote = F,row.names = F,sep='\t')
+
+##############################筛选差异亚群 fc为差异的倍数##############################
+fc=4
+sig_cell_type=as.character(cell_num1[which((cell_num1$fc>fc | cell_num1$fc<(1/fc)) & cell_num1$p.val<0.05),'cell_name'])
+sig_cell_type
+write.table(sig_cell_type,'sig_cell_type.txt',quote = F,row.names = F,sep='\t',col.names = F)
+
+#######################ReactomeGSA 富集分析#################################
+#使用ReactomeGSA对亚群进行功能富集分析，通过pathways函数提取通路富集的结果。
+library(ReactomeGSA)
+library(Seurat)
+DefaultAssay(sce) <- "RNA"
+sce = sce[,sample(1:ncol(sce),round(ncol(sce)/10)) ]
+gsva_result <- analyse_sc_clusters(sce, verbose = TRUE)
+pathway_expression <- pathways(gsva_result)
+colnames(pathway_expression) <- gsub("\\.Seurat", "", colnames(pathway_expression))
+write.csv(pathway_expression,file = 'reactomegsa_sce.csv',quote = F,row.names = F)
+
+# find the maximum differently expressed pathway
+#这里定义了一个筛选目标通路的方法，首先，我们计算每一个通路评分的最大值和最小值之间的差值，
+#然后针对这个差值进行排序，我们筛选这个差异最大前10个通路进行分析
+max_difference <- do.call(rbind, apply(pathway_expression, 1, function(row) {
+  values <- as.numeric(row[2:length(row)])
+  return(data.frame(name = row[1], min = min(values), max = max(values)))
+}))
+max_difference$diff <- max_difference$max - max_difference$min
+max_difference <- max_difference[order(max_difference$diff, decreasing = T), ]
+write.csv(max_difference,"max_difference.csv")
+plot_num = 10
+plot_gsva <- pathway_expression[rownames(max_difference[1:plot_num,]),]
+#差异最大前10个通路可视化
+pdf("max_difference_top10.pdf")
+pheatmap::pheatmap(t(plot_gsva[,-1]),
+                   scale ="row",
+                   angle_col = 90,cellwidth = 15,cellheight = 15,
+                   labels_col = plot_gsva[,1],
+                   # cellwidth = 10, cellheight = 8,
+                   color = colorRampPalette(c("navy", "white", "firebrick3"))(50))
+
+dev.off()
+
+
+library(tidyverse)
+#1
+barplot_pathway <- plot_gsva_pathway(gsva_result, pathway_id = rownames(max_difference)[1]) 
+barplot_pathway$data %>% mutate(absmy = ifelse(expr>=0, "Z","Fy")) -> barplot_pathway1
+pp1<-barplot_pathway1 %>% ggplot(aes(cluster_id,   expr ,fill=absmy))+ 
+  geom_bar(stat='identity') + theme_bw()+ xlab('')+ylab('ES')+
+  theme(axis.text.x = element_text(angle =90,hjust = .9,size = 10,vjust = 0.9))+ 
+  ggtitle(max_difference$name[1]) + theme(legend.position="none")+coord_flip()
+pp1
+ggsave(filename = 'pp1.pdf',plot = pp1,he=7,wi=7)
+#2
+barplot_pathway <- plot_gsva_pathway(gsva_result, pathway_id = rownames(max_difference)[2]) 
+barplot_pathway$data %>% mutate(absmy = ifelse(expr>=0, "Z","Fy")) -> barplot_pathway1
+pp2<-barplot_pathway1 %>% ggplot(aes(cluster_id,   expr ,fill=absmy    ))+ 
+  geom_bar(stat='identity') + theme_bw()+ xlab('')+ylab('ES')+
+  theme(axis.text.x = element_text(angle =90,hjust = .9,size = 10,vjust = 0.9))+ 
+  ggtitle(max_difference$name[2]) + theme(legend.position="none")+coord_flip()
+pp2
+ggsave(filename = 'pp2.pdf',plot = pp2,he=7,wi=7)
+#3
+barplot_pathway <- plot_gsva_pathway(gsva_result, pathway_id = rownames(max_difference)[3]) 
+barplot_pathway$data %>% mutate(absmy = ifelse(expr>=0, "Z","Fy")) -> barplot_pathway1
+pp3<-barplot_pathway1 %>% ggplot(aes(cluster_id,   expr ,fill=absmy    ))+ 
+  geom_bar(stat='identity') + theme_bw()+ xlab('')+ylab('ES')+
+  theme(axis.text.x = element_text(angle =90,hjust = .9,size = 10,vjust = 0.9))+ 
+  ggtitle(max_difference$name[3]) + theme(legend.position="none")+coord_flip()
+pp3
+ggsave(filename = 'pp3.pdf',plot = pp3,he=7,wi=7)
+#4
+barplot_pathway <- plot_gsva_pathway(gsva_result, pathway_id = rownames(max_difference)[4]) 
+barplot_pathway$data %>% mutate(absmy = ifelse(expr>=0, "Z","Fy")) -> barplot_pathway1
+pp4<-barplot_pathway1 %>% ggplot(aes(cluster_id,   expr ,fill=absmy    ))+ 
+  geom_bar(stat='identity') + theme_bw()+ xlab('')+ylab('ES')+
+  theme(axis.text.x = element_text(angle =90,hjust = .9,size = 10,vjust = 0.9))+ 
+  ggtitle(max_difference$name[4]) + theme(legend.position="none")+coord_flip()
+pp4
+ggsave(filename = 'pp4.pdf',plot = pp4,he=7,wi=7)
+#5
+barplot_pathway <- plot_gsva_pathway(gsva_result, pathway_id = rownames(max_difference)[5]) 
+barplot_pathway$data %>% mutate(absmy = ifelse(expr>=0, "Z","Fy")) -> barplot_pathway1
+pp5<-barplot_pathway1 %>% ggplot(aes(cluster_id,   expr ,fill=absmy    ))+ 
+  geom_bar(stat='identity') + theme_bw()+ xlab('')+ylab('ES')+
+  theme(axis.text.x = element_text(angle =90,hjust = .9,size = 10,vjust = 0.9))+ 
+  ggtitle(max_difference$name[5]) + theme(legend.position="none")+coord_flip()
+pp5
+ggsave(filename = 'pp5.pdf',plot = pp5,he=7,wi=7)
+#6
+barplot_pathway <- plot_gsva_pathway(gsva_result, pathway_id = rownames(max_difference)[6]) 
+barplot_pathway$data %>% mutate(absmy = ifelse(expr>=0, "Z","Fy")) -> barplot_pathway1
+pp6<-barplot_pathway1 %>% ggplot(aes(cluster_id,   expr ,fill=absmy    ))+ 
+  geom_bar(stat='identity') + theme_bw()+ xlab('')+ylab('ES')+
+  theme(axis.text.x = element_text(angle =90,hjust = .9,size = 10,vjust = 0.9))+ 
+  ggtitle(max_difference$name[6]) + theme(legend.position="none")+coord_flip()
+pp6
+ggsave(filename = 'pp6.pdf',plot = pp6,he=7,wi=7)
+#7
+barplot_pathway <- plot_gsva_pathway(gsva_result, pathway_id = rownames(max_difference)[7]) 
+barplot_pathway$data %>% mutate(absmy = ifelse(expr>=0, "Z","Fy")) -> barplot_pathway1
+pp7<-barplot_pathway1 %>% ggplot(aes(cluster_id,   expr ,fill=absmy    ))+ 
+  geom_bar(stat='identity') + theme_bw()+ xlab('')+ylab('ES')+
+  theme(axis.text.x = element_text(angle =90,hjust = .9,size = 10,vjust = 0.9))+ 
+  ggtitle(max_difference$name[7]) + theme(legend.position="none")+coord_flip()
+pp7
+ggsave(filename = 'pp7.pdf',plot = pp7,he=7,wi=7)
+#8
+barplot_pathway <- plot_gsva_pathway(gsva_result, pathway_id = rownames(max_difference)[8]) 
+barplot_pathway$data %>% mutate(absmy = ifelse(expr>=0, "Z","Fy")) -> barplot_pathway1
+pp8<-barplot_pathway1 %>% ggplot(aes(cluster_id,   expr ,fill=absmy    ))+ 
+  geom_bar(stat='identity') + theme_bw()+ xlab('')+ylab('ES')+
+  theme(axis.text.x = element_text(angle =90,hjust = .9,size = 10,vjust = 0.9))+ 
+  ggtitle(max_difference$name[8]) + theme(legend.position="none")+coord_flip()
+pp8
+ggsave(filename = 'pp8.pdf',plot = pp8,he=7,wi=7)
+#9
+barplot_pathway <- plot_gsva_pathway(gsva_result, pathway_id = rownames(max_difference)[9]) 
+barplot_pathway$data %>% mutate(absmy = ifelse(expr>=0, "Z","Fy")) -> barplot_pathway1
+pp9<-barplot_pathway1 %>% ggplot(aes(cluster_id,   expr ,fill=absmy    ))+ 
+  geom_bar(stat='identity') + theme_bw()+ xlab('')+ylab('ES')+
+  theme(axis.text.x = element_text(angle =90,hjust = .9,size = 10,vjust = 0.9))+ 
+  ggtitle(max_difference$name[9]) + theme(legend.position="none")+coord_flip()
+pp9
+ggsave(filename = 'pp9.pdf',plot = pp9,he=7,wi=7)
+#10
+barplot_pathway <- plot_gsva_pathway(gsva_result, pathway_id = rownames(max_difference)[10]) 
+barplot_pathway$data %>% mutate(absmy = ifelse(expr>=0, "Z","Fy")) -> barplot_pathway1
+pp10<-barplot_pathway1 %>% ggplot(aes(cluster_id,   expr ,fill=absmy    ))+ 
+  geom_bar(stat='identity') + theme_bw()+ xlab('')+ylab('ES')+
+  theme(axis.text.x = element_text(angle =90,hjust = .9,size = 10,vjust = 0.9))+ 
+  ggtitle(max_difference$name[10]) + theme(legend.position="none")+coord_flip()
+pp10
+ggsave(filename = 'pp10.pdf',plot = pp10,he=7,wi=7)
+

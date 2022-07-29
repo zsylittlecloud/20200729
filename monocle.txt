@@ -1,0 +1,234 @@
+setwd('D:/GBM单细胞/5monocle')
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(gtools)
+library(stringr)
+library(Matrix)
+library(tidyverse)
+library(patchwork)
+library(data.table)
+library(RColorBrewer)
+library(ggpubr)
+library(monocle)
+memory.limit(60000)
+load('sce2.RData')
+sig_cell_type<-read.delim('sig_cell_type.txt',sep='\t',header = F)
+sig_cell_type=as.character(sig_cell_type$V1)
+cell_anno<-read.delim('celltype.txt',sep='\t',header = T)
+sce.markers<-read.delim('scRNA_marker_gene.txt',sep='\t',header = T)
+#新增cell_type一列，并修改亚群名称
+sce$cell_type=sce$seurat_clusters
+for (i in 1:nrow(cell_anno)){
+  sce$cell_type=gsub(paste0('^',cell_anno$ClusterID[i],'$'),
+                     as.character(cell_anno$celltype[i]),sce$cell_type)
+}
+#提取差异的亚群sce文件并保存
+sce_sig<-subset(sce,idents = cell_anno[cell_anno$celltype %in% sig_cell_type,1])
+save(sce_sig,file = 'sce_sig.RData')
+rm(sce)
+
+load('sce_sig.RData')
+sce_sig = sce_sig[,sample(1:ncol(sce_sig),round(ncol(sce_sig)/5)) ]
+################monocle细胞轨迹分析#############################
+#对差异的亚群的表达谱文件和注释文件，构建monocle数据分析的对象
+exp.rawdata <- as(as.matrix(GetAssayData(sce_sig,slot = "counts")), 'sparseMatrix')
+#构建featuredata，一般featuredata需要两个col，一个是gene_id,一个是gene_short_name,row对应counts的rownames
+feature_ann<-data.frame(gene_short_name=rownames(sce_sig))
+rownames(feature_ann) <- rownames(exp.rawdata)
+scRNA_fd <-new("AnnotatedDataFrame", data = feature_ann)
+sample_ann <- sce_sig@meta.data
+#rownames(sample_ann)<-colnames(Mono_matrix)
+rm(sce_sig)
+scRNA_pd<-new("AnnotatedDataFrame", data =sample_ann)
+#build new cell data set
+scRNA.cds<-newCellDataSet(exp.rawdata,
+                          phenoData =scRNA_pd,
+                          featureData =scRNA_fd,
+                          expressionFamily=negbinomial.size())
+rm(exp.rawdata)
+#查看phenodata、featuredata
+head(pData(scRNA.cds))
+head(fData(scRNA.cds))
+
+
+#计算size factors 和 dispersions，用于后期分析；
+scRNA.cds <- estimateSizeFactors(scRNA.cds)
+scRNA.cds <- estimateDispersions(scRNA.cds)
+# Filtering low-quality cells
+scRNA.cds <- detectGenes(scRNA.cds, min_expr = 0.1)
+expressed_genes <- row.names(subset(fData(scRNA.cds),
+                                    num_cells_expressed >= 0.01*ncol(scRNA.cds))) 
+#筛选基因,这里可以根据自己的需要筛选特定的基因
+Top200 <- sce.markers %>% group_by(cluster) %>% 
+               slice_max(n =500, order_by = avg_log2FC) %>% 
+               slice_max(n =200, order_by =pct.diff)  
+
+ordering_genes <- intersect(unique(Top200$gene),rownames(scRNA.cds))
+scRNA.cds <- setOrderingFilter(scRNA.cds, ordering_genes)
+plot_ordering_genes(scRNA.cds)
+
+#用DDRtree 进行降维分析，计算发育时间
+scRNA.cds <- reduceDimension(scRNA.cds,
+                             norm_method ='log', 
+                             max_components = 2,
+                             method = 'DDRTree')
+
+#计算psudotime值
+scRNA.cds <- orderCells(scRNA.cds)
+head(pData(scRNA.cds))
+head(scRNA.cds$cell_type)
+
+save(scRNA.cds,file = 'scRNA.cds.RData')
+
+
+
+mono_cell=plot_cell_trajectory(scRNA.cds,cell_size = 1, color_by = "cell_type")+
+  theme(legend.position = "right",
+        text=element_text(size=10),
+        legend.title=element_blank(),
+        panel.background = element_rect(fill = "white", colour = "black",size = 0.2), 
+        legend.key = element_rect(fill = "white", colour = "white"),
+        legend.background = (element_rect(colour= "white",fill = "white")))+
+  facet_wrap("~cell_type", ncol=2)+
+  guides(shape = guide_legend(override.aes = list(size = 3),nrow = 10),
+         color = guide_legend(override.aes = list(size = 3),nrow = 10))
+mono_cell
+ggsave(filename = 'mono_cell.pdf',mono_cell,he=9,wi=9)
+
+
+
+
+
+mono_state<-plot_cell_trajectory(scRNA.cds,cell_size = 1,
+                                 color_by = "State")+
+  theme(legend.position = "right",
+        text=element_text(size=10),
+        panel.background = element_rect(fill = "white", 
+                                        colour = "black",size = 0.2), 
+        legend.key = element_rect(fill = "white", colour = "white"),
+        legend.background = (element_rect(colour= "white",fill = "white")))
+mono_state
+ggsave(filename = 'mono_state.pdf',mono_state,he=5,wi=5)
+
+
+
+
+mono_time=plot_cell_trajectory(scRNA.cds,cell_size = 1, color_by = "Pseudotime")+
+  scale_color_gradient(low = 'red',high = 'blue')+
+  theme(legend.position = "right",
+        text=element_text(size=10),
+        panel.background = element_rect(fill = "white", colour = "black",size = 0.2), 
+        legend.key = element_rect(fill = "white", colour = "white"),
+        legend.background = (element_rect(colour= "white",fill = "white")))
+mono_time
+ggsave(filename = 'mono_time.pdf',mono_time,he=5,wi=5)
+
+#四种亚群，每一个做轨迹
+#每一个细胞亚群中，包含哪些cluster
+sig_cell_type[1]
+cell_anno[cell_anno$celltype %in% sig_cell_type[1],1]
+sig_cell_type[2]
+cell_anno[cell_anno$celltype %in% sig_cell_type[2],1]
+sig_cell_type[3]
+cell_anno[cell_anno$celltype %in% sig_cell_type[3],1]
+sig_cell_type[4]
+cell_anno[cell_anno$celltype %in% sig_cell_type[4],1]
+
+mono_celltype=plot_cell_trajectory(scRNA.cds,cell_size = 1, color_by = "seurat_clusters")+
+  theme(legend.position = "right",
+        text=element_text(size=10),
+        legend.title=element_blank(),
+        panel.background = element_rect(fill = "white", colour = "black",size = 0.2), 
+        legend.key = element_rect(fill = "white", colour = "white"),
+        legend.background = (element_rect(colour= "white",fill = "white")))+
+  facet_wrap("~cell_type", ncol=2)+
+  guides(shape = guide_legend(override.aes = list(size = 3),ncol = 2),
+         color = guide_legend(override.aes = list(size = 3),ncol = 2))
+mono_celltype
+ggsave(filename = 'mono_celltype.pdf',plot = mono_celltype,width = 9,height = 5)
+
+mono_cluster=plot_cell_trajectory(scRNA.cds,cell_size = 1, color_by = "seurat_clusters")+
+  theme(legend.position = "right",
+        text=element_text(size=10),
+        legend.title=element_blank(),
+        panel.background = element_rect(fill = "white", colour = "black",size = 0.2), 
+        legend.key = element_rect(fill = "white", colour = "white"),
+        legend.background = (element_rect(colour= "white",fill = "white")))+
+  facet_wrap("~seurat_clusters", ncol=3)+
+  guides(shape = guide_legend(override.aes = list(size = 3),ncol = 2),
+         color = guide_legend(override.aes = list(size = 3),ncol = 2))
+mono_cluster
+ggsave(filename = 'mono_cluster.pdf',plot = mono_cluster,width = 15,height = 15)
+
+
+
+#BEAM统计分析
+BEAM_res1 <- BEAM(scRNA.cds[ordering_genes,], branch_point = 1, cores = 1)
+BEAM_res1 <- BEAM_res1[order(BEAM_res1$qval),]
+BEAM_res1 <- BEAM_res1[,c("gene_short_name", "pval", "qval")]
+#选100前个基因可视化 使用beam的统计方法计算 在细胞发育过程中基因的 贡献值，这里选择前100个 基因进行可视化
+BEAM_genes1<-BEAM_res1[order(-BEAM_res1$qval),][c(1:100),'gene_short_name']
+
+length(BEAM_genes1)
+BEAM_p1 <- plot_genes_branched_heatmap(scRNA.cds[BEAM_genes1,], 
+                                       branch_point = 1, 
+                                       num_clusters = 3, show_rownames = T, 
+                                       return_heatmap = T)
+
+BEAM_p1$ph_res
+
+anno_row<-BEAM_p1$annotation_row
+BEAM_genes_dat<-t(as.matrix(scRNA.cds@assayData$exprs[BEAM_genes1,]))
+meta_clust<-data.frame(cell=colnames(scRNA.cds),
+                       cell_type=scRNA.cds$cell_type,
+                       seraut_cluster=scRNA.cds$seurat_clusters,
+                       Pseudotime=scRNA.cds$Pseudotime)
+colnames(BEAM_genes_dat)=gsub('-','__',colnames(BEAM_genes_dat))
+BEAM_genes_dat<-merge(meta_clust,
+                      data.frame(cell=rownames(BEAM_genes_dat),BEAM_genes_dat),
+                      by='cell')
+BEAM_genes_dat[1:4,1:4]
+rownames(BEAM_genes_dat)=BEAM_genes_dat$cell
+BEAM_genes_dat=BEAM_genes_dat[,-1]
+BEAM_genes_dat[1:4,1:4]
+#排序
+BEAM_genes_dat=BEAM_genes_dat[order(BEAM_genes_dat$cell_type,
+                                    BEAM_genes_dat$seraut_cluster,
+                                    BEAM_genes_dat$Pseudotime),]
+anno_row=data.frame(gene=rownames(anno_row),Cluster=anno_row$Cluster)
+anno_row=anno_row[order(anno_row$Cluster),]
+dim(anno_row)
+write.table(anno_row,'state_100_gene.txt',quote = F,sep='\t',row.names = F)
+colnames(BEAM_genes_dat)=gsub('__','-',colnames(BEAM_genes_dat))
+
+anno_col=BEAM_genes_dat[,c(1,2,3)]
+gene_clust=t(BEAM_genes_dat[,-c(1,2,3)])
+bk<-c(seq(-2,-0.1,by=0.01),seq(0,2,by=0.01))
+anno_row1=data.frame(Cluster=anno_row$Cluster)
+rownames(anno_row1)=anno_row$gene
+
+pheatmap::pheatmap(gene_clust[rownames(anno_row1),],scale = 'row',
+                   show_colnames = F,annotation_row = anno_row1,
+                   annotation_col = anno_col,
+                   show_rownames = F,cluster_rows = F,cluster_cols = F,
+                   color=c(colorRampPalette(colors=c("blue","white"))(length(bk)/2),
+                           colorRampPalette(colors=c("white","red"))(length(bk)/2)),
+                   legend_breaks=seq(-2,2,1),breaks=bk,
+                   filename = 'state.gene.pdf')
+
+pheatmap::pheatmap(gene_clust[rownames(anno_row1),],scale = 'row',
+                   show_colnames = F,annotation_row = anno_row1,
+                   annotation_col = anno_col,
+                   show_rownames = F,cluster_rows = F,cluster_cols = F,
+                   color=c(colorRampPalette(colors=c("blue","white"))(length(bk)/2),
+                           colorRampPalette(colors=c("white","red"))(length(bk)/2)),
+                   legend_breaks=seq(-2,2,1),breaks=bk,
+                   filename = 'state.gene.png')
+
+
+head(anno_row)
+
+write.table(anno_row,'state_100_gene.txt',quote = F,row.names = F,sep='\t')
+
