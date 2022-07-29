@@ -1,0 +1,66 @@
+
+library(SingleR)
+library(celldex)
+library(BiocParallel)
+library(Seurat)
+memory.limit(60000)
+
+hpca.se <- HumanPrimaryCellAtlasData()
+load('sce2.RData')
+
+testdata <- GetAssayData(sce, slot="data")
+
+clusters <- sce@meta.data$seurat_clusters
+pred.sce <- SingleR(test =  testdata, 
+                    ref = hpca.se, 
+                    labels = hpca.se$label.main,
+                    method = "clusters",
+                    clusters = clusters, 
+                    assay.type.test = "logcounts", 
+                    assay.type.ref = "logcounts")
+
+plotScoreHeatmap(pred.sce)
+celltype = data.frame(ClusterID=rownames(pred.sce), celltype=pred.sce$labels
+                      , stringsAsFactors = F)
+celltype
+
+write.table(celltype,'celltype.txt',quote = F,sep = '\t',row.names = F)
+
+sce <- RenameIdents(object = sce, 
+                      "0" = celltype[1,2],
+                      "1" = celltype[2,2],
+                      "2" = celltype[3,2],
+                      "3" = celltype[4,2],
+                      "4" = celltype[5,2],
+                      "5" = celltype[6,2],
+                      "6" = celltype[7,2],
+                      "7" = celltype[8,2],
+                      "8" = celltype[9,2],
+                      "9" = celltype[10,2],
+                      "10" = celltype[11,2],
+                      "11" = celltype[12,2],
+                      "12" = celltype[13,2])
+
+length(table(sce@active.ident))
+allcolour=c("#DC143C","#0000FF","#20B2AA","#FFA500","#9370DB","#98FB98","#F08080","#1E90FF","#7CFC00","#FFFF00",
+            "#808000","#FF00FF","#CCCCFF","#000000","#7B68EE","#9400D3","#A0522D","#800080","#D2B48C","#D2691E",
+            "#87CEEB","#40E0D0","#5F9EA0","#FF1493","#0000CD","#008B8B","#FFE4B5","#8A2BE2","#228B22","#E9967A",
+            "#4682B4","#32CD32","#F0E68C","#FFFFE0","#EE82EE","#FF6347","#6A5ACD","#9932CC","#8B008B","#8B4513",
+            "#DEB887")
+length(table(sce@active.ident))
+mycolor = allcolour[1:length(table(sce@active.ident))]
+
+umap_celltype<-DimPlot(sce,cols=mycolor,
+                       reduction="umap",
+                       label = "T", 
+                       pt.size = 0.2,
+                       label.size = 5)
+
+umap_celltype
+ggplot2::ggsave('umap_celltype.pdf',plot = umap_celltype,he=7,wi=9)
+save(sce,file = 'sce3.RData')
+
+
+
+
+

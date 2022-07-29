@@ -1,0 +1,172 @@
+library(Seurat)
+library(CellChat)
+library(patchwork)
+
+
+memory.limit(120000)
+load('sce2.RData')
+
+
+sce = sce[,sample(1:ncol(sce),round(ncol(sce)/5)) ]
+save(sce,file = 'sce55.RData')
+load('sce55.RData')
+
+ 
+data.input=normalizeData(as.matrix(GetAssayData(sce,slot = "counts")),
+                         scale.factor = 10000, do.log = TRUE)
+cell_type=sce@meta.data
+
+rm(sce)
+
+
+cell_anno<-read.delim('celltype.txt',sep='\t',header = T,)
+colnames(cell_anno)=c('seurat_clusters','cell_type')
+cell_type=merge(data.frame(cell=rownames(cell_type),cell_type),
+                cell_anno,by='seurat_clusters')
+head(cell_type)
+rownames(cell_type)=cell_type$cell
+
+
+cellchat <- createCellChat(object = data.input, meta = cell_type, group.by = "cell_type")
+
+cellchat <- addMeta(cellchat, meta = cell_type)
+
+cellchat <- setIdent(cellchat, ident.use = "cell_type") 
+levels(cellchat@idents) 
+
+groupSize <- as.numeric(table(cellchat@idents)) 
+
+CellChatDB=CellChatDB.human
+
+
+CellChatDB.use <- CellChatDB
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat) 
+
+cellchat <- identifyOverExpressedGenes(cellchat)
+
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat,raw.use = TRUE,type = "truncatedMean",trim=0)
+
+ 
+cellchat <- computeCommunProbPathway(cellchat)
+df.netp <- subsetCommunication(cellchat,slot.name='netP')
+
+
+
+
+cellchat <- aggregateNet(cellchat)
+
+groupSize <- as.numeric(table(cellchat@idents))
+pdf('net_number_strength.pdf',he=9,wi=15,onefile = F)
+par(mfrow = c(1,2)) 
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, 
+                 weight.scale = T, label.edge= F, title.name = "Number of interactions") 
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T,
+                 label.edge= F, title.name = "Interaction weights/strength")
+
+dev.off()
+
+
+mat <- cellchat@net$count
+cell_num=length(as.character(unique(cell_type$cell_type)))
+cell_col=ceiling(sqrt(cell_num))
+cell_row=ceiling(cell_num/cell_col)
+pdf('net_number_individual.pdf',he=15,wi=15)
+par(mfrow = c(cell_row,cell_col), xpd=TRUE) 
+for (i in 1:nrow(mat)) { 
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))   
+  mat2[i, ] <- mat[i, ]   
+  netVisual_circle(mat2, vertex.weight = groupSize, 
+                   weight.scale = T, arrow.width = 0.2,                     
+                   arrow.size = 0.1, edge.weight.max = max(mat), 
+                   title.name = rownames(mat)[i])
+}
+dev.off()
+write.table(df.net,file = 'cellchat_result.txt',quote = F,row.names = F,sep='\t')
+
+
+cellchat@netP$pathways  
+
+pathways.show <- c("SEMA3")
+
+levels(cellchat@idents)
+
+vertex.receiver = c(1,3) 
+p1=netVisual_aggregate(cellchat, signaling = pathways.show, 
+                    vertex.receiver = vertex.receiver,
+                    layout = 'hierarchy')
+p1
+pdf('SEMA3_hierarchy.pdf',he=7,wi=15)
+print(p1)
+dev.off()
+
+
+p2=netVisual_aggregate(cellchat, signaling = pathways.show,
+                    vertex.receiver=vertex.receiver,
+                    layout = "circle")
+
+p2
+pdf('SEMA3.pdf',he=7,wi=12)
+print(p2)
+dev.off()
+
+
+pdf('MHC-II_chord.pdf',he=15,wi=15)
+netVisual_aggregate(cellchat, signaling = pathways.show,
+                       layout = "chord")
+dev.off()
+
+
+pdf('MHC-II_heatmap.pdf',he=7,wi=7)
+par(mfrow=c(1,1)) 
+netVisual_heatmap(cellchat,
+                  signaling = pathways.show, 
+                  color.heatmap = "Reds")
+dev.off()
+
+
+p3<-netAnalysis_contribution(cellchat,
+                         signaling = pathways.show) 
+p3
+pairLR.path <- extractEnrichedLR(cellchat,
+                                 signaling = pathways.show
+                                 , geneLR.return = FALSE) 
+pairLR.path
+pdf('MHC-II_LR_ontribution.pdf')
+print(p3)
+dev.off()
+
+
+LR.show <- pairLR.path[1,]
+pdf('MHC-II_LR_hierarchy.pdf',he=7,wi=7)
+netVisual_individual(cellchat, 
+                     signaling = pathways.show,
+                     pairLR.use = LR.show, layout = "circle")
+dev.off()
+
+
+levels(cellchat@idents)
+
+pdf('1.pdf',he=7,wi=7)
+netVisual_bubble(cellchat, 
+                 sources.use = c(1,7,8),  
+                 targets.use = c(3,4,5), 
+                 remove.isolate = FALSE)
+dev.off()
+
+
+cellchat@netP$pathways
+
+pdf('2.pdf',he=7,wi=7)
+netVisual_bubble(cellchat, 
+                 sources.use = c(3,5,7,8,9), 
+                 targets.use = c(1,2,4,6),                  
+                 signaling = c("SEMA3","MSTN"), 
+                 remove.isolate = FALSE)
+dev.off()
+
